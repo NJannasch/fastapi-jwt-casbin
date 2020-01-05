@@ -1,0 +1,71 @@
+import jwt
+from casbin import Enforcer
+from starlette.datastructures import Headers
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+
+class CasbinMiddleware:
+    def __init__(self, app: ASGIApp, settings, enforcer: Enforcer) -> None:
+        self.app = app
+        self.settings = settings
+        self.enforcer = enforcer
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        headers = Headers(scope=scope)
+        auth_header = headers.get("authorization", None)
+
+        if not auth_header:
+            response = JSONResponse(
+                status_code=HTTP_401_UNAUTHORIZED,
+                content={"message": "Authorization required."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+            await response(scope, receive, send)
+            return
+
+        try:
+            auth_method, token = auth_header.split(" ")
+            if auth_method.lower() == "bearer":
+
+                payload = jwt.decode(token, self.settings.JWT_SECRET_KEY, algorithms=[self.settings.JWT_ALGORITHM])
+                user = payload.get("sub")
+                if user is None:
+                    user = "anonymous"
+
+                request = Request(scope, receive)
+                if self.check_permission(request=request, user=user):
+                    await self.app(scope, receive, send)
+                    return
+
+                content = "Insufficient permissions."
+                status_code = HTTP_403_FORBIDDEN
+        except jwt.PyJWTError:
+            # Decoding went wrong
+            content = "Could not validate credentials."
+            status_code = HTTP_401_UNAUTHORIZED
+        except ValueError:
+            # Invalid format of header
+            content = "ToDo"
+            status_code = HTTP_401_UNAUTHORIZED
+        except:
+            status_code = HTTP_401_UNAUTHORIZED
+            content = "ToDo"
+
+        # Invalid request
+        response = JSONResponse(
+            status_code=status_code,
+            content={"message": content},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+        await response(scope, receive, send)
+        return
+
+    def check_permission(self, request: Request, user):
+        path = request.url.path
+        method = request.method
+        return self.enforcer.enforce(user, path, method)
